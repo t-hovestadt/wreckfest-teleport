@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use crate::math::Transform;
 use crate::process::{find_process_pid, ProcessHandle};
-use crate::scan::{locate_matrix, ScanResult};
-use crate::signatures::{MATRIX_BACK_OFFSET, MATRIX_BACK_OFFSET_ALT, MATRIX_SIZE_BYTES};
+use crate::scan::{locate_matrix_candidates, ScanResult};
+use crate::signatures::MATRIX_SIZE_BYTES;
 use crate::telemetry::{Deriver, Telemetry};
 
 /// Reader configuration.
@@ -52,6 +52,12 @@ pub trait TelemetrySink {
 
 /// Drop the lock and re-scan after this many consecutive invalid reads.
 const MAX_INVALID_FRAMES: u32 = 30;
+/// How long a locked transform may stay byte-identical before we treat it as a
+/// stale/despawned lock and re-scan. A live car (even idling) jitters; a dead
+/// leftover copy of the node does not.
+const STALE_LOCK_SECS: f32 = 1.5;
+/// Gap between the two reads used to probe a candidate's liveness.
+const LIVENESS_PROBE: Duration = Duration::from_millis(80);
 
 fn parse_matrix(bytes: &[u8; MATRIX_SIZE_BYTES]) -> Transform {
     let mut m = [0f32; 16];
@@ -62,19 +68,41 @@ fn parse_matrix(bytes: &[u8; MATRIX_SIZE_BYTES]) -> Transform {
     Transform::from_floats(m)
 }
 
-/// Scan with the primary offset; if the resulting matrix fails validation, retry
-/// with the documented experimental offset. Returns a validated lock or None.
-fn acquire_lock(proc: &ProcessHandle, slot: u8) -> Option<ScanResult> {
-    for &back in &[MATRIX_BACK_OFFSET, MATRIX_BACK_OFFSET_ALT] {
-        if let Some(res) = locate_matrix(proc, slot, back) {
-            if let Some(bytes) = proc.read_exact::<MATRIX_SIZE_BYTES>(res.matrix_address) {
-                if parse_matrix(&bytes).basis_looks_valid() {
-                    return Some(res);
-                }
+/// Choose a validated, *live* lock among all candidate addresses.
+///
+/// Wreckfest leaves stale copies of `carRootNode00` in freed memory after a race
+/// change, so the first match is not always the live car -- a dead copy's
+/// transform never updates. We keep every basis-valid candidate, then read each
+/// twice a short gap apart and prefer one whose bytes changed (the live car
+/// jitters even at rest; a dead copy is frozen). If none changed in the probe
+/// window we fall back to the first basis-valid candidate.
+fn acquire_lock(proc: &ProcessHandle, slot: u8, shutdown: &Arc<AtomicBool>) -> Option<ScanResult> {
+    let candidates = locate_matrix_candidates(proc, slot);
+
+    let mut valid: Vec<(ScanResult, [u8; MATRIX_SIZE_BYTES])> = Vec::new();
+    for c in candidates {
+        if let Some(bytes) = proc.read_exact::<MATRIX_SIZE_BYTES>(c.matrix_address) {
+            if parse_matrix(&bytes).basis_looks_valid() {
+                valid.push((c, bytes));
             }
         }
     }
-    None
+
+    match valid.len() {
+        0 => None,
+        1 => Some(valid[0].0),
+        _ => {
+            sleep_interruptible(LIVENESS_PROBE, shutdown);
+            for (res, first) in &valid {
+                if let Some(second) = proc.read_exact::<MATRIX_SIZE_BYTES>(res.matrix_address) {
+                    if second != *first {
+                        return Some(*res);
+                    }
+                }
+            }
+            Some(valid[0].0)
+        }
+    }
 }
 
 /// Run the reader until `shutdown` is set. Blocks the calling thread.
@@ -108,7 +136,7 @@ pub fn run<S: TelemetrySink>(config: ReaderConfig, shutdown: Arc<AtomicBool>, si
             if shutdown.load(Ordering::Relaxed) || !proc.is_alive() {
                 break None;
             }
-            if let Some(res) = acquire_lock(&proc, config.slot) {
+            if let Some(res) = acquire_lock(&proc, config.slot, &shutdown) {
                 break Some(res);
             }
             // Not found yet (likely still at menus / car not spawned). Retry.
@@ -136,6 +164,8 @@ pub fn run<S: TelemetrySink>(config: ReaderConfig, shutdown: Arc<AtomicBool>, si
         let mut last = Instant::now();
         let mut invalid_streak: u32 = 0;
         let mut alive_check = Instant::now();
+        let mut last_bytes: Option<[u8; MATRIX_SIZE_BYTES]> = None;
+        let mut static_secs: f32 = 0.0;
 
         loop {
             if shutdown.load(Ordering::Relaxed) {
@@ -154,6 +184,23 @@ pub fn run<S: TelemetrySink>(config: ReaderConfig, shutdown: Arc<AtomicBool>, si
                         // derived acceleration.
                         let dt = (now - last).as_secs_f32().clamp(0.0005, 0.1);
                         last = now;
+
+                        // Stale-lock guard: a live car (even idling) jitters; a
+                        // dead leftover copy is byte-identical forever. If nothing
+                        // changes for a while, the lock is stale or the car
+                        // despawned to a menu -> re-scan to find the live car.
+                        if Some(bytes) == last_bytes {
+                            static_secs += dt;
+                        } else {
+                            static_secs = 0.0;
+                            last_bytes = Some(bytes);
+                        }
+                        if static_secs > STALE_LOCK_SECS {
+                            sink.on_status(Status::LockLost);
+                            deriver.reset();
+                            break;
+                        }
+
                         let frame = deriver.update(&transform, dt);
                         sink.on_frame(&frame);
                     } else {

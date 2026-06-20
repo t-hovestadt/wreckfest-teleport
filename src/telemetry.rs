@@ -46,10 +46,39 @@ pub struct Telemetry {
 pub struct Deriver {
     primed: bool,
     total_time: f32,
-    last_position: Vec3,
-    last_local_velocity: Vec3,
-    last_gforce: Vec3,
+    /// Position seen on the previous frame (to detect whether the game advanced).
+    last_seen_position: Vec3,
+    /// Position at the last *actual* change, plus time accumulated since then.
+    change_anchor_pos: Vec3,
+    secs_since_change: f32,
+    /// Raw world velocity, held across duplicate frames.
+    raw_world_velocity: Vec3,
+    /// EMA-smoothed world velocity (what we report / derive accel from).
+    smooth_world_velocity: Vec3,
+    last_smooth_local_velocity: Vec3,
+    smooth_gforce: Vec3,
+    last_out_gforce: Vec3,
+    smooth_angular: Euler,
     last_orientation: Euler,
+}
+
+/// Position change (game units) below which a frame is treated as a duplicate.
+const POSITION_EPS: f32 = 1.0e-4;
+/// If the transform does not advance for this long, treat the car as stopped.
+const STOP_TIMEOUT: f32 = 0.12;
+/// Per-frame EMA factors for velocity and acceleration smoothing.
+const VEL_SMOOTH: f32 = 0.35;
+const ACC_SMOOTH: f32 = 0.25;
+/// Clamp each acceleration axis to a sane range so a quantisation step can never
+/// emit a multi-hundred-g spike to a motion rig.
+const MAX_G: f32 = 16.0;
+
+fn ema(prev: Vec3, new: Vec3, alpha: f32) -> Vec3 {
+    Vec3::new(
+        prev.x + alpha * (new.x - prev.x),
+        prev.y + alpha * (new.y - prev.y),
+        prev.z + alpha * (new.z - prev.z),
+    )
 }
 
 impl Deriver {
@@ -63,17 +92,29 @@ impl Deriver {
     }
 
     /// Produce one telemetry frame. `dt` is seconds since the previous frame.
-    /// The first call after a reset primes state and returns position +
-    /// orientation only (velocity/accel need two samples).
+    ///
+    /// Wreckfest updates the transform at the game's own rate, which is lower
+    /// than our poll rate, so naive per-frame differencing aliases badly: the
+    /// velocity reads zero on frames where the game has not advanced and spikes
+    /// on the frames where it has (producing absurd hundreds-of-g accelerations).
+    /// To fix this we measure velocity over the real interval between actual
+    /// position changes, hold it across duplicate frames, smooth it, and clamp
+    /// the derived acceleration.
     pub fn update(&mut self, transform: &Transform, dt: f32) -> Telemetry {
         let position = transform.position();
         let orientation = euler_from_transform(transform);
 
         if !self.primed || dt <= 0.0 {
             self.primed = true;
-            self.last_position = position;
-            self.last_local_velocity = Vec3::default();
-            self.last_gforce = Vec3::default();
+            self.last_seen_position = position;
+            self.change_anchor_pos = position;
+            self.secs_since_change = 0.0;
+            self.raw_world_velocity = Vec3::default();
+            self.smooth_world_velocity = Vec3::default();
+            self.last_smooth_local_velocity = Vec3::default();
+            self.smooth_gforce = Vec3::default();
+            self.last_out_gforce = Vec3::default();
+            self.smooth_angular = Euler::default();
             self.last_orientation = orientation;
             return Telemetry {
                 total_time: self.total_time,
@@ -84,33 +125,62 @@ impl Deriver {
         }
 
         self.total_time += dt;
+        self.secs_since_change += dt;
 
-        // World velocity from position delta.
-        let world_velocity = position.sub(self.last_position).scale(1.0 / dt);
-        // Project into the car frame: lateral / vertical / longitudinal.
+        // Did the game actually advance the transform this frame?
+        let moved = position.sub(self.last_seen_position).length() > POSITION_EPS;
+        if moved {
+            let interval = self.secs_since_change.max(1.0e-4);
+            self.raw_world_velocity = position.sub(self.change_anchor_pos).scale(1.0 / interval);
+            self.change_anchor_pos = position;
+            self.secs_since_change = 0.0;
+        } else if self.secs_since_change > STOP_TIMEOUT {
+            // No update for a while: the car has actually stopped.
+            self.raw_world_velocity = Vec3::default();
+        }
+        // else: duplicate frame within the update window -> hold velocity.
+        self.last_seen_position = position;
+
+        // Smooth world velocity, then project into the car frame.
+        self.smooth_world_velocity =
+            ema(self.smooth_world_velocity, self.raw_world_velocity, VEL_SMOOTH);
+        let world_velocity = self.smooth_world_velocity;
         let local_velocity = transform.world_to_local(world_velocity);
         let speed = world_velocity.length();
 
-        // Local acceleration in g (1/G == SpaceMonkey's 0.10197162129779283).
-        let gforce = local_velocity
-            .sub(self.last_local_velocity)
+        // Acceleration from the smoothed local velocity, smoothed again and
+        // clamped. x=lateral, y=vertical, z=longitudinal (g).
+        let raw_g = local_velocity
+            .sub(self.last_smooth_local_velocity)
             .scale(1.0 / dt)
             .scale(1.0 / G);
+        self.last_smooth_local_velocity = local_velocity;
+        self.smooth_gforce = ema(self.smooth_gforce, raw_g, ACC_SMOOTH);
+        let gforce = Vec3::new(
+            self.smooth_gforce.x.clamp(-MAX_G, MAX_G),
+            self.smooth_gforce.y.clamp(-MAX_G, MAX_G),
+            self.smooth_gforce.z.clamp(-MAX_G, MAX_G),
+        );
 
-        // Angular velocity from wrapped angle deltas.
-        let angular_velocity = Euler {
+        // Angular velocity (rad/s) from wrapped angle deltas, EMA-smoothed to
+        // suppress the same per-frame aliasing.
+        let raw_angular = Euler {
             pitch: angular_change(self.last_orientation.pitch, orientation.pitch) / dt,
             yaw: angular_change(self.last_orientation.yaw, orientation.yaw) / dt,
             roll: angular_change(self.last_orientation.roll, orientation.roll) / dt,
         };
-
-        // Impact = magnitude of the change in the g-force vector.
-        let impact = gforce.sub(self.last_gforce).length();
-
-        self.last_position = position;
-        self.last_local_velocity = local_velocity;
-        self.last_gforce = gforce;
         self.last_orientation = orientation;
+        self.smooth_angular = Euler {
+            pitch: self.smooth_angular.pitch
+                + VEL_SMOOTH * (raw_angular.pitch - self.smooth_angular.pitch),
+            yaw: self.smooth_angular.yaw + VEL_SMOOTH * (raw_angular.yaw - self.smooth_angular.yaw),
+            roll: self.smooth_angular.roll
+                + VEL_SMOOTH * (raw_angular.roll - self.smooth_angular.roll),
+        };
+
+        // Impact: magnitude of the change in the (smoothed, clamped) g vector.
+        let impact = gforce.sub(self.last_out_gforce).length();
+        self.last_out_gforce = gforce;
 
         Telemetry {
             total_time: self.total_time,
@@ -120,7 +190,7 @@ impl Deriver {
             local_velocity,
             speed,
             gforce,
-            angular_velocity,
+            angular_velocity: self.smooth_angular,
             impact,
         }
     }
@@ -151,15 +221,54 @@ mod tests {
     }
 
     #[test]
-    fn forward_motion_produces_surge_speed() {
+    fn steady_forward_motion_converges_to_surge_speed() {
         let mut d = Deriver::new();
         let dt = 0.1;
-        d.update(&identity_at(0.0, 0.0, 0.0), dt);
-        // Moved +10 along world Z in 0.1s => 100 units/s forward.
-        let t = d.update(&identity_at(0.0, 0.0, 10.0), dt);
-        assert!((t.speed - 100.0).abs() < 1e-3);
-        // With identity orientation, forward axis is world Z => surge (local z).
-        assert!((t.local_velocity.z - 100.0).abs() < 1e-3);
-        assert!(t.local_velocity.x.abs() < 1e-3);
+        // Move +1 unit of world Z every frame => 10 u/s forward.
+        let mut z = 0.0f32;
+        d.update(&identity_at(0.0, 0.0, z), dt);
+        let mut last = Telemetry::default();
+        for _ in 0..40 {
+            z += 1.0;
+            last = d.update(&identity_at(0.0, 0.0, z), dt);
+        }
+        // After smoothing converges, speed sits at ~10 u/s along surge (local z).
+        assert!((last.speed - 10.0).abs() < 0.5, "speed={}", last.speed);
+        assert!((last.local_velocity.z - 10.0).abs() < 0.5);
+        assert!(last.local_velocity.x.abs() < 0.5);
+    }
+
+    #[test]
+    fn aliased_updates_stay_stable_and_bounded() {
+        // Reproduce the real bug: the reader polls at a steady rate but the game
+        // only advances the transform every other poll. Naive differencing would
+        // alternate speed 0/large and emit hundreds of g. The deriver must keep
+        // speed steady and acceleration bounded.
+        let mut d = Deriver::new();
+        let dt = 0.01; // 100 Hz poll
+        let mut z = 0.0f32;
+        d.update(&identity_at(0.0, 0.0, z), dt);
+        let mut min_spd = f32::INFINITY;
+        let mut max_spd = f32::NEG_INFINITY;
+        let mut max_g = 0.0f32;
+        for i in 0..200 {
+            if i % 2 == 1 {
+                z += 0.3; // 0.3 units per 0.02 s => 15 u/s
+            }
+            let t = d.update(&identity_at(0.0, 0.0, z), dt);
+            if i > 80 {
+                min_spd = min_spd.min(t.speed);
+                max_spd = max_spd.max(t.speed);
+                max_g = max_g
+                    .max(t.gforce.x.abs())
+                    .max(t.gforce.y.abs())
+                    .max(t.gforce.z.abs());
+            }
+        }
+        assert!(
+            min_spd > 12.0 && max_spd < 18.0,
+            "speed should hug 15, got {min_spd}..{max_spd}"
+        );
+        assert!(max_g < 5.0, "steady motion must not spike g, got {max_g}");
     }
 }
