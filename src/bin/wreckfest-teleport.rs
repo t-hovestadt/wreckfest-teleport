@@ -8,8 +8,8 @@
 //! Examples:
 //!   wreckfest-teleport
 //!   wreckfest-teleport console --rate 100
-//!   wreckfest-teleport udp --target 192.168.50.2:22123
-//!   wreckfest-teleport udp --target 192.168.50.2:22123 --format native
+//!   wreckfest-teleport udp --target 192.168.50.2:20777
+//!   wreckfest-teleport udp --target 192.168.50.2:20777 --format native
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -20,7 +20,7 @@ use wreckfest_teleport::reader::{run, ReaderConfig, Status, TelemetrySink};
 use wreckfest_teleport::telemetry::Telemetry;
 use wreckfest_teleport::VERSION;
 
-const DEFAULT_PORT: u16 = 22123;
+const DEFAULT_PORT: u16 = 20777;
 
 fn print_help() {
     println!(
@@ -233,9 +233,9 @@ fn main() {
                     );
                     if args.format == Format::SimHub {
                         eprintln!(
-                            "[note] SimHub format currently emits the native packet as a \
-                             placeholder; wire the generated .simdef struct before expecting \
-                             SimHub to validate it."
+                            "[note] SimHub format = Codemasters extradata=3 (DiRT Rally 2.0). \
+                             In SimHub, enable the DiRT Rally 2.0 game; it listens on UDP \
+                             port 20777, so target that port."
                         );
                     }
                     run(config, shutdown, &mut sink);

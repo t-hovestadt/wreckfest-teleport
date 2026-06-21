@@ -7,12 +7,11 @@
 //!   It is fully defined here, so it works today and can be verified with any
 //!   loopback receiver. Use this to prove the read->network path end to end.
 //!
-//! * `pack_simhub()` is where SimHub's External Sim "contract" packet goes. That
-//!   format includes a header with a game/telemetry signature that SimHub
-//!   computes from the `.simdef` you author in its editor. Those exact bytes
-//!   come from SimHub's "copy demo code (C#/C++)" button. We deliberately do not
-//!   guess them. Once you paste that generated struct, it drops straight in here
-//!   and the rest of the pipeline (socket, cadence, field mapping) is unchanged.
+//! * `pack_simhub()` emits the Codemasters extradata=3 (DiRT Rally 2.0) UDP
+//!   packet, which SimHub reads natively via its DiRT Rally 2.0 plugin on UDP
+//!   port 20777. WF1 has only motion data, so we fill position, world velocity,
+//!   the orientation direction vectors, speed and lateral/longitudinal g, and
+//!   leave every engine/suspension/wheel field at zero.
 
 use std::io;
 use std::net::UdpSocket;
@@ -30,7 +29,7 @@ pub const NATIVE_VERSION: u16 = 1;
 pub enum Format {
     /// Our own documented packet (works now, for testing the pipe).
     Native,
-    /// SimHub External Sim contract (pending the generated struct; see below).
+    /// SimHub via the Codemasters extradata=3 (DiRT Rally 2.0) UDP format.
     SimHub,
 }
 
@@ -133,17 +132,49 @@ pub fn pack_native(t: &Telemetry, seq: u64) -> Vec<u8> {
     b
 }
 
-/// SimHub External Sim contract packet.
+/// SimHub-compatible packet: the Codemasters "extradata=3" UDP format used by
+/// DiRT Rally / DiRT Rally 2.0 (264 bytes = 66 little-endian f32). SimHub reads
+/// this natively via its DiRT Rally 2.0 plugin (UDP port 20777), so we skip the
+/// External Sim editor entirely.
 ///
-/// PENDING: paste the struct + constants from SimHub's "copy demo code" button
-/// (after authoring `wreckfest.simdef`) and serialise those exact fields/header
-/// here. Until then this returns the native packet so the binary still runs end
-/// to end; it will NOT validate against SimHub until the real layout is wired.
-pub fn pack_simhub(t: &Telemetry, seq: u64) -> Vec<u8> {
-    // TODO(simhub): replace with the generated External Sim structure:
-    //   - SimHub header (magic + game signature + telemetry signature)
-    //   - declared fields in the order shown by the editor, correct units
-    pack_native(t, seq)
+/// WF1 gives us real motion only, so we fill the fields we can and leave the
+/// rest zero (honest absence, never fabricated):
+///   [0]       total time (s)
+///   [4..=6]   world position x/y/z
+///   [7]       speed (m/s)
+///   [8..=10]  world velocity x/y/z
+///   [11..=13] roll vector  = car right-axis unit vector
+///   [14..=16] pitch vector = car forward-axis unit vector
+///   [34]      lateral g
+///   [35]      longitudinal g
+///   [36]      current lap = 1 (so SimHub treats the feed as on-stage)
+/// Everything else (suspension, wheels, throttle, gear, RPM, fuel, ...) is 0,
+/// because WF1 does not expose it.
+pub fn pack_simhub(t: &Telemetry, _seq: u64) -> Vec<u8> {
+    const FLOATS: usize = 66; // extradata=3 => 264 bytes
+    let mut p = [0f32; FLOATS];
+    p[0] = t.total_time;
+    p[4] = t.position.x;
+    p[5] = t.position.y;
+    p[6] = t.position.z;
+    p[7] = t.speed;
+    p[8] = t.world_velocity.x;
+    p[9] = t.world_velocity.y;
+    p[10] = t.world_velocity.z;
+    p[11] = t.right.x;
+    p[12] = t.right.y;
+    p[13] = t.right.z;
+    p[14] = t.forward.x;
+    p[15] = t.forward.y;
+    p[16] = t.forward.z;
+    p[34] = t.gforce.x; // lateral g
+    p[35] = t.gforce.z; // longitudinal g
+    p[36] = 1.0; // current lap: nonzero so SimHub sees an active stage
+    let mut b = Vec::with_capacity(FLOATS * 4);
+    for v in p {
+        b.extend_from_slice(&v.to_le_bytes());
+    }
+    b
 }
 
 #[cfg(test)]
@@ -167,5 +198,33 @@ mod tests {
         assert_eq!(&p[0..4], &NATIVE_MAGIC.to_le_bytes());
         // header: 4+2+2+8 = 16 bytes, then 21 f32 = 84 bytes => 100 total.
         assert_eq!(p.len(), 16 + 21 * 4);
+    }
+
+    #[test]
+    fn simhub_packet_is_codemasters_extradata3_layout() {
+        let t = Telemetry {
+            total_time: 12.5,
+            speed: 30.0,
+            position: Vec3::new(1.0, 2.0, 3.0),
+            world_velocity: Vec3::new(4.0, 5.0, 6.0),
+            right: Vec3::new(1.0, 0.0, 0.0),
+            forward: Vec3::new(0.0, 0.0, 1.0),
+            gforce: Vec3::new(0.7, 0.0, -0.9),
+            ..Default::default()
+        };
+        let p = pack_simhub(&t, 1);
+        // extradata=3 is exactly 264 bytes (66 little-endian f32).
+        assert_eq!(p.len(), 264);
+        let f = |i: usize| f32::from_le_bytes([p[i * 4], p[i * 4 + 1], p[i * 4 + 2], p[i * 4 + 3]]);
+        assert_eq!(f(0), 12.5); // total time
+        assert_eq!(f(4), 1.0); // pos x
+        assert_eq!(f(6), 3.0); // pos z
+        assert_eq!(f(7), 30.0); // speed
+        assert_eq!(f(10), 6.0); // world vel z
+        assert_eq!(f(11), 1.0); // roll vector x = right.x
+        assert_eq!(f(16), 1.0); // pitch vector z = forward.z
+        assert_eq!(f(34), 0.7); // lateral g
+        assert_eq!(f(35), -0.9); // longitudinal g
+        assert_eq!(f(36), 1.0); // current lap
     }
 }

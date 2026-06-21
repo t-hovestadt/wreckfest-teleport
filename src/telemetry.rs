@@ -20,6 +20,11 @@ pub struct Telemetry {
     pub position: Vec3,
     /// Orientation in radians (pitch, yaw, roll).
     pub orientation: Euler,
+    /// Car's right and forward unit vectors in world space, taken straight from
+    /// the matrix basis. Used to fill the Codemasters roll/pitch direction
+    /// vectors for SimHub.
+    pub right: Vec3,
+    pub forward: Vec3,
 
     // --- derived from the matrix over time ---
     /// World-space velocity vector (units/s).
@@ -120,6 +125,8 @@ impl Deriver {
                 total_time: self.total_time,
                 position,
                 orientation,
+                right: transform.right(),
+                forward: transform.forward(),
                 ..Default::default()
             };
         }
@@ -186,6 +193,8 @@ impl Deriver {
             total_time: self.total_time,
             position,
             orientation,
+            right: transform.right(),
+            forward: transform.forward(),
             world_velocity,
             local_velocity,
             speed,
