@@ -10,8 +10,10 @@
 //! * `pack_simhub()` emits the Codemasters extradata=3 (DiRT Rally 2.0) UDP
 //!   packet, which SimHub reads natively via its DiRT Rally 2.0 plugin on UDP
 //!   port 20777. WF1 has only motion data, so we fill position, world velocity,
-//!   the orientation direction vectors, speed and lateral/longitudinal g, and
-//!   leave every engine/suspension/wheel field at zero.
+//!   the orientation direction vectors, speed and lateral/longitudinal g. Wheel
+//!   speeds carry the car's ground speed (the no-slip baseline) so SimHub's
+//!   slip/lock effects stay silent; every other engine/suspension field is left
+//!   at zero, the inert value for the effects that read it.
 
 use std::io;
 use std::net::UdpSocket;
@@ -145,11 +147,16 @@ pub fn pack_native(t: &Telemetry, seq: u64) -> Vec<u8> {
 ///   [8..=10]  world velocity x/y/z
 ///   [11..=13] roll vector  = car right-axis unit vector
 ///   [14..=16] pitch vector = car forward-axis unit vector
+///   [25..=28] wheel speeds  = ground speed (no-slip baseline; see note below)
 ///   [34]      lateral g
 ///   [35]      longitudinal g
 ///   [36]      current lap = 1 (so SimHub treats the feed as on-stage)
-/// Everything else (suspension, wheels, throttle, gear, RPM, fuel, ...) is 0,
-/// because WF1 does not expose it.
+/// Everything else (suspension, throttle, brake, gear, RPM, fuel, ...) is 0:
+/// WF1 does not expose it, and 0 is the inert value for those effects. Wheel
+/// speeds are the exception -- a 0 there reads to SimHub as "wheels locked
+/// while moving" and fires wheel-slip and wheel-lock/ABS effects nonstop.
+/// Reporting ground speed is the no-slip baseline, so that math reads ~0 and
+/// those effects stay silent; only real-data effects drive haptics.
 pub fn pack_simhub(t: &Telemetry, _seq: u64) -> Vec<u8> {
     const FLOATS: usize = 66; // extradata=3 => 264 bytes
     let mut p = [0f32; FLOATS];
@@ -167,6 +174,16 @@ pub fn pack_simhub(t: &Telemetry, _seq: u64) -> Vec<u8> {
     p[14] = t.forward.x;
     p[15] = t.forward.y;
     p[16] = t.forward.z;
+    // Wheel speeds (25-28). We do not measure wheel rotation; reporting the car's
+    // ground speed is the no-slip baseline. SimHub derives wheel slip and
+    // wheel-lock from (wheel_speed - ground_speed), so ground speed makes those
+    // read ~0 and stay silent, instead of reading a 0 here as locked wheels and
+    // firing those effects nonstop. This neutralizes a non-real effect using
+    // real speed; it does not fabricate a signal to create one.
+    p[25] = t.speed;
+    p[26] = t.speed;
+    p[27] = t.speed;
+    p[28] = t.speed;
     p[34] = t.gforce.x; // lateral g
     p[35] = t.gforce.z; // longitudinal g
     p[36] = 1.0; // current lap: nonzero so SimHub sees an active stage
@@ -226,5 +243,13 @@ mod tests {
         assert_eq!(f(34), 0.7); // lateral g
         assert_eq!(f(35), -0.9); // longitudinal g
         assert_eq!(f(36), 1.0); // current lap
+        // Wheel speeds carry ground speed so SimHub sees no slip / no lock.
+        assert_eq!(f(25), 30.0);
+        assert_eq!(f(26), 30.0);
+        assert_eq!(f(27), 30.0);
+        assert_eq!(f(28), 30.0);
+        // Fields WF1 cannot provide stay at their inert zero.
+        assert_eq!(f(33), 0.0); // gear
+        assert_eq!(f(37), 0.0); // engine rate / RPM
     }
 }
