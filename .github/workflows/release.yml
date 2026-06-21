@@ -31,7 +31,6 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist/wreckfest-teleport | Out-Null
           Copy-Item target/x86_64-pc-windows-msvc/release/wreckfest-teleport.exe dist/wreckfest-teleport/
           Copy-Item scripts/*.bat dist/wreckfest-teleport/
-          Copy-Item wreckfest.simdef dist/wreckfest-teleport/
           Copy-Item README.md dist/wreckfest-teleport/
           Compress-Archive -Path dist/wreckfest-teleport/* -DestinationPath dist/wreckfest-teleport-${{ github.ref_name }}-windows.zip
           Copy-Item target/x86_64-pc-windows-msvc/release/wreckfest-teleport.exe dist/
@@ -43,5 +42,4 @@ jobs:
             dist/wreckfest-teleport-${{ github.ref_name }}-windows.zip
             dist/wreckfest-teleport.exe
             scripts/*.bat
-            wreckfest.simdef
           generate_release_notes: true
