@@ -11,10 +11,10 @@
 //! we do not fabricate them. What you get is exactly what the game reveals.
 //!
 //! ## Library-first
-//! All logic lives here so this folds into sim-teleport as `crates/
-//! wreckfest-teleport` later with no restructuring. The entry point is
-//! [`reader::run`], driven by a [`reader::ReaderConfig`] and a
-//! [`reader::TelemetrySink`]. [`emitter::UdpEmitter`] is a ready-made sink.
+//! All logic lives in the library and the binary is a thin shell, so the crate
+//! is easy to reuse. The entry point is [`reader::run`], driven by a
+//! [`reader::ReaderConfig`] and a [`reader::TelemetrySink`];
+//! [`emitter::UdpEmitter`] is a ready-made sink.
 
 pub mod emitter;
 pub mod math;

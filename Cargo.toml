@@ -7,7 +7,7 @@ description = "Automatic telemetry reader for Wreckfest 1 (reads real position/o
 license = "MIT"
 repository = "https://github.com/t-hovestadt/wreckfest-teleport"
 
-# Library-first: lib.rs holds all logic so this folds into sim-teleport as a crate later.
+# Library-first: all logic lives in lib.rs so the binary stays a thin shell and the crate is reusable.
 [lib]
 name = "wreckfest_teleport"
 path = "src/lib.rs"

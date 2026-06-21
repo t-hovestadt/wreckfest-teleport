@@ -44,7 +44,7 @@ pub enum Status {
 }
 
 /// Where telemetry and status updates go. Implement this for console output, a
-/// UDP emitter, or (after the merge) sim-teleport's orchestrator.
+/// UDP emitter, or any other consumer.
 pub trait TelemetrySink {
     fn on_status(&mut self, status: Status);
     fn on_frame(&mut self, frame: &Telemetry);
