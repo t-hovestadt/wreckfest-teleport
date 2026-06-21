@@ -4,11 +4,15 @@
 //!   (default / `console`)  Print live telemetry to the terminal. Use this to
 //!                          confirm we are reading real Wreckfest data.
 //!   `udp`                  Stream telemetry to the SimHub PC over UDP.
+//!   `pick`                 Same UDP stream, plus a window listing every car
+//!                          with a live speed so you can click your own in
+//!                          multiplayer (single-player auto-selects car 00).
 //!
 //! Examples:
 //!   wreckfest-teleport
 //!   wreckfest-teleport console --rate 100
 //!   wreckfest-teleport udp --target 192.168.50.2:20777
+//!   wreckfest-teleport pick --target 192.168.50.2:20777
 //!   wreckfest-teleport udp --target 192.168.50.2:20777 --format native
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -35,11 +39,12 @@ USAGE:
 MODES:
     console            Print telemetry to the terminal (default)
     udp                Stream telemetry to the SimHub PC over UDP
+    pick               UDP stream + a window to click your car (multiplayer)
 
 OPTIONS:
     --target <IP:PORT> UDP destination (udp mode). Default port {DEFAULT_PORT}
     --rate <HZ>        Poll rate in Hz (default 100, min 60 recommended)
-    --slot <N>         Player car slot (default 0; single-player is always 0)
+    --slot <N>         Player car slot / initial pick (default 0; SP is 0)
     --format <FMT>     udp packet format: native | simhub (default simhub)
     -h, --help         Show this help
     -V, --version      Show version
@@ -58,6 +63,7 @@ struct Args {
 enum Mode {
     Console,
     Udp,
+    Pick,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -78,6 +84,10 @@ fn parse_args() -> Result<Args, String> {
             }
             "udp" => {
                 mode = Mode::Udp;
+                it.next();
+            }
+            "pick" => {
+                mode = Mode::Pick;
                 it.next();
             }
             _ => {}
@@ -244,6 +254,18 @@ fn main() {
                     eprintln!("error: could not open UDP socket to {}: {e}", args.target);
                     std::process::exit(1);
                 }
+            }
+        }
+        Mode::Pick => {
+            println!(
+                "[mode] pick -> {} ({:?}, default car {:02}). Close the window to stop.",
+                args.target, args.format, args.slot
+            );
+            if let Err(e) =
+                wreckfest_teleport::picker::run(args.target.clone(), args.format, args.slot)
+            {
+                eprintln!("error: picker failed to start: {e}");
+                std::process::exit(1);
             }
         }
     }

@@ -18,6 +18,7 @@
 
 pub mod emitter;
 pub mod math;
+pub mod picker;
 pub mod process;
 pub mod reader;
 pub mod scan;

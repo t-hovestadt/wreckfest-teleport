@@ -1,8 +1,12 @@
 //! Memory scanner: locate the `carRootNodeNN` ASCII string in the live process,
 //! then resolve the transform-matrix address from it.
 
+use std::collections::BTreeMap;
+use std::time::Duration;
+
+use crate::math::Transform;
 use crate::process::ProcessHandle;
-use crate::signatures;
+use crate::signatures::{self, MATRIX_SIZE_BYTES};
 
 /// How much to read per chunk while scanning a region (8 MiB).
 const CHUNK: usize = 8 * 1024 * 1024;
@@ -107,6 +111,70 @@ pub fn locate_matrix_candidates(proc: &ProcessHandle, slot: u8) -> Vec<ScanResul
                     slot,
                 });
             }
+        }
+    }
+    out
+}
+
+/// Liveness-probe gap, mirroring the reader's lock validation.
+const PROBE_GAP: Duration = Duration::from_millis(80);
+
+/// Find *every* car in the session in a single memory pass.
+///
+/// Scanning per-slot (up to 24x) would be unusably slow, so we scan once for the
+/// shared `carRootNode` prefix, read the two trailing ASCII digits to recover
+/// each slot, resolve its matrix address, and keep one validated, *live* copy
+/// per slot. Wreckfest leaves stale duplicates after a race change, so when a
+/// slot has several candidates we read each twice a short gap apart and prefer
+/// the one whose bytes change (a live car jitters; a dead copy is frozen).
+pub fn locate_all_cars(proc: &ProcessHandle) -> Vec<ScanResult> {
+    let prefix = signatures::CAR_NODE_PREFIX.as_bytes();
+    let hits = find_all_patterns(proc, prefix, 256);
+
+    let mut by_slot: BTreeMap<u8, Vec<usize>> = BTreeMap::new();
+    for string_addr in hits {
+        let mut digits = [0u8; 2];
+        if proc.read(string_addr + prefix.len(), &mut digits) != 2 {
+            continue;
+        }
+        if !digits[0].is_ascii_digit() || !digits[1].is_ascii_digit() {
+            continue;
+        }
+        let slot = (digits[0] - b'0') * 10 + (digits[1] - b'0');
+        if let Some(matrix_address) = string_addr.checked_sub(signatures::MATRIX_BACK_OFFSET) {
+            by_slot.entry(slot).or_default().push(matrix_address);
+        }
+    }
+
+    let mut out = Vec::new();
+    for (slot, addrs) in by_slot {
+        let mut valid: Vec<(usize, [u8; MATRIX_SIZE_BYTES])> = Vec::new();
+        for a in addrs {
+            if let Some(bytes) = proc.read_exact::<MATRIX_SIZE_BYTES>(a) {
+                if Transform::from_le_bytes(&bytes).basis_looks_valid() {
+                    valid.push((a, bytes));
+                }
+            }
+        }
+        let chosen = match valid.len() {
+            0 => None,
+            1 => Some(valid[0].0),
+            _ => {
+                std::thread::sleep(PROBE_GAP);
+                let mut pick = valid[0].0;
+                for (a, first) in &valid {
+                    if let Some(second) = proc.read_exact::<MATRIX_SIZE_BYTES>(*a) {
+                        if second != *first {
+                            pick = *a;
+                            break;
+                        }
+                    }
+                }
+                Some(pick)
+            }
+        };
+        if let Some(matrix_address) = chosen {
+            out.push(ScanResult { matrix_address, slot });
         }
     }
     out

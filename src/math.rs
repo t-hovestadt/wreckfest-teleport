@@ -253,3 +253,16 @@ mod tests {
         assert_eq!(v, Vec3::new(3.0, -2.0, 5.0));
     }
 }
+
+impl Transform {
+    /// Build a transform from 64 little-endian bytes: the row-major 4x4 f32
+    /// matrix exactly as it sits in Wreckfest's process memory.
+    pub fn from_le_bytes(bytes: &[u8; 64]) -> Self {
+        let mut m = [0f32; 16];
+        for (i, s) in m.iter_mut().enumerate() {
+            let o = i * 4;
+            *s = f32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]);
+        }
+        Self::from_floats(m)
+    }
+}
