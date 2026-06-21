@@ -42,7 +42,6 @@ jobs:
           files: |
             dist/wreckfest-teleport-${{ github.ref_name }}-windows.zip
             dist/wreckfest-teleport.exe
-            scripts/1-verify-console.bat
-            scripts/2-stream-to-simhub.bat
+            scripts/*.bat
             wreckfest.simdef
           generate_release_notes: true
