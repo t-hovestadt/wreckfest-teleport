@@ -37,7 +37,7 @@ trigger and hardcodes gear. **Wreckfest Teleport never fabricates anything.**
 - World position (x, y, z)
 - Orientation: pitch, yaw, roll
 - Velocity — world and car-local (surge / sway / heave) — and scalar speed
-- G-forces: lateral, longitudinal, vertical (ideal for bass shakers / motion)
+- G-forces: lateral, longitudinal, and vertical (which of these SimHub can actually use is in the effects list below)
 - Angular rates: pitch / yaw / roll
 - Impact magnitude (a crash signal derived from sudden g-force changes)
 
@@ -45,11 +45,52 @@ trigger and hardcodes gear. **Wreckfest Teleport never fabricates anything.**
 these): engine RPM, gear, throttle / brake / clutch, suspension, tyre temps and
 pressures, fuel, flags, lap / sector data.
 
-> **Practical consequence:** motion, wind, and crash/impact haptics work great.
-> Anything keyed to engine RPM, gear, or wheel rotation — Fanatec shift lights, a
-> gear display, SimHub's wheel-slip effect — cannot work, because the game does
-> not provide that data to read. (Wheel-slip in particular should be turned off:
-> with no wheel-speed data it reads as permanent slip.)
+> **Practical consequence:** motion, wind, and cornering/acceleration haptics
+> work great. Anything keyed to engine RPM or gear — Fanatec shift lights, a gear
+> display, engine/rev effects — cannot work, because the game doesn't expose it.
+> Wheel-slip and wheel-lock effects can't reflect real grip either, but the tool
+> reports wheel speed as the car's ground speed so they read no slip and stay
+> silent rather than firing constantly (no need to disable them by hand).
+
+---
+
+## SimHub effects: what works
+
+What SimHub can do follows directly from the channels Wreckfest Teleport sends in
+the DiRT Rally 2.0 packet: time, position, speed, world velocity, the car's
+orientation vectors, and **lateral + longitudinal G**. There is no engine, gear,
+suspension, per-wheel, or vertical-G channel in that format, so effects that need
+those have nothing to read.
+
+**Works — driven by real telemetry**
+
+| SimHub feature | Driven by | Notes |
+|----------------|-----------|-------|
+| **Wind simulation** | speed | Scales with car speed. Confirmed on-rig. |
+| **ShakeIt — acceleration / braking (surge)** | longitudinal G | Throttle-on squat and braking dive. |
+| **ShakeIt — cornering (sway)** | lateral G | Side-to-side load through corners. |
+| **ShakeIt — G-force / "G-meter" effects** | lateral + longitudinal G | The surge + sway pair above. |
+| **ShakeIt — simulated road texture / road rumble** | speed | SimHub *synthesises* this from speed, so it works without suspension data. Confirmed on-rig. |
+| **Hard impacts / crashes** | longitudinal-G spike | A big hit shows up as a sudden G change, so the surge effect jolts. There's no dedicated collision channel, so light contact may not register. |
+| **Dashes / overlays: speed, position, lap timer, heading** | speed, position, orientation | Numeric readouts and speed-gated LEDs work. |
+| **Motion rigs: surge, sway, pitch, roll, yaw** | G + orientation | Five DOF. **Heave (vertical) has no data** — see below. |
+
+**Won't work — Wreckfest doesn't expose the data**
+
+| SimHub feature | Why |
+|----------------|-----|
+| **Engine RPM / rev / idle vibration** | No RPM in Wreckfest. |
+| **Gear-shift effect** | No gear value. |
+| **Wheel slip / wheel spin (traction loss)** | No wheel-rotation data. Deliberately neutralised (wheel speed = ground speed) so it stays **silent** instead of firing nonstop. |
+| **Wheel lock / ABS rumble** | Same — no real wheel speed or ABS flag; neutralised. |
+| **Road impacts / kerbs / bumps from suspension** | Suspension travel isn't exposed, so these stay inert. (The *simulated* road texture above still works — it's speed-based.) |
+| **Heave (vertical-G) shaker or motion** | The DiRT Rally 2.0 format carries lateral + longitudinal G only; there is no vertical channel. |
+| **Traction control / DRS / KERS / fuel / tyre temps / flags** | Not applicable to Wreckfest and not in the feed. |
+
+**Rule of thumb:** anything tied to **how the car moves through space** — speed,
+cornering, acceleration, braking, wind, big impacts — works. Anything tied to the
+**engine, gearbox, or individual wheels** does not, because Wreckfest 1 keeps that
+data to itself.
 
 ---
 
